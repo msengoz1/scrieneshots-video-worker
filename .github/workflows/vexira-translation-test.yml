@@ -1,0 +1,128 @@
+name: Vexira Turkish Translation Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+      B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download English transcript
+        run: |
+          aws s3 cp \
+            "s3://${B2_BUCKET}/subtitle-tests/transcript-en.txt" \
+            transcript-en.txt \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+      - name: Install translation packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install "transformers<5" sentencepiece torch safetensors
+
+      - name: Translate to Turkish
+        run: |
+          cat > translate_vexira.py <<'PY'
+          import re
+          import torch
+          from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+          MODEL = "uixova/vexira"
+
+          tokenizer = AutoTokenizer.from_pretrained(
+              MODEL,
+              trust_remote_code=True
+          )
+
+          model = AutoModelForSeq2SeqLM.from_pretrained(
+              MODEL,
+              trust_remote_code=True
+          )
+          model.eval()
+
+          pattern = re.compile(
+              r"^\[(.*?) --> (.*?)\]\s*(.*)$"
+          )
+
+          entries = []
+
+          with open("transcript-en.txt", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+
+                  if not line:
+                      continue
+
+                  m = pattern.match(line)
+
+                  if not m:
+                      continue
+
+                  start, end, english = m.groups()
+
+                  inputs = tokenizer(
+                      english,
+                      return_tensors="pt",
+                      truncation=True,
+                      max_length=256
+                  )
+
+                  with torch.no_grad():
+                      output = model.generate(
+                          **inputs,
+                          max_new_tokens=256,
+                          num_beams=4
+                      )
+
+                  turkish = tokenizer.decode(
+                      output[0],
+                      skip_special_tokens=True
+                  ).strip()
+
+                  entries.append(
+                      (start, end, english, turkish)
+                  )
+
+          with open(
+              "vexira-comparison.txt",
+              "w",
+              encoding="utf-8"
+          ) as out:
+
+              for i, (start, end, en, tr) in enumerate(entries, 1):
+                  out.write(
+                      f"{i}\n"
+                      f"{start} --> {end}\n"
+                      f"EN: {en}\n"
+                      f"TR: {tr}\n\n"
+                  )
+
+          print(f"Translated {len(entries)} segments")
+          PY
+
+          python translate_vexira.py
+
+      - name: Upload comparison to B2
+        run: |
+          aws s3 cp \
+            vexira-comparison.txt \
+            "s3://${B2_BUCKET}/subtitle-tests/vexira-comparison.txt" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+      - name: Verify
+        run: |
+          aws s3 ls \
+            "s3://${B2_BUCKET}/subtitle-tests/vexira-comparison.txt" \
+            --endpoint-url "https://${B2_ENDPOINT}"
