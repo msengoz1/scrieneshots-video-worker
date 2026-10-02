@@ -6,7 +6,7 @@ on:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
@@ -20,49 +20,44 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Download English transcript
+      - name: Download English transcript from B2
         run: |
           aws s3 cp \
             "s3://${B2_BUCKET}/subtitle-tests/transcript-en.txt" \
-            transcript-en.txt \
+            "transcript-en.txt" \
             --endpoint-url "https://${B2_ENDPOINT}"
+
+          echo "Transcript downloaded:"
+          head -n 10 transcript-en.txt
 
       - name: Install Vexira
         run: |
-          git clone https://github.com/uixova/vexira.git
           python -m pip install --upgrade pip
           pip install torch sentencepiece huggingface_hub
 
-          mkdir -p vexira/models
+          git clone https://github.com/uixova/vexira.git
+          cd vexira
 
-          huggingface-cli download \
+          mkdir -p models
+
+          hf download \
             uixova/vexira \
             vexira_sft.pt \
             vexira_spm.model \
-            --local-dir vexira/models
+            --local-dir models
 
-      - name: Translate with Vexira
+          echo "Vexira files:"
+          find . -maxdepth 2 -type f | sort
+
+      - name: Prepare clean English text
         run: |
-          cd vexira
-
-          python - <<'PY'
-          import sys
+          python <<'PY'
           import re
 
-          sys.path.insert(0, ".")
-
-          from translate import Translator
-
-          translator = Translator()
-
-          with open("../transcript-en.txt", "r", encoding="utf-8") as f:
+          with open("transcript-en.txt", "r", encoding="utf-8") as f:
               lines = f.readlines()
 
-          output = []
-
-          pattern = re.compile(
-              r'^\[(.*?) --> (.*?)\]\s*(.*)$'
-          )
+          cleaned = []
 
           for line in lines:
               line = line.strip()
@@ -70,48 +65,68 @@ jobs:
               if not line:
                   continue
 
-              match = pattern.match(line)
-
-              if not match:
-                  continue
-
-              start = match.group(1)
-              end = match.group(2)
-              english = match.group(3).strip()
-
-              if not english:
-                  continue
-
-              turkish = translator.translate(
-                  [english],
-                  tgt_lang="tr"
-              )[0]
-
-              output.append(
-                  f"[{start} --> {end}] "
-                  f"EN: {english}\n"
-                  f"TR: {turkish}\n"
+              # Remove Whisper timestamps such as:
+              # [00:00:01,000 --> 00:00:04,000]
+              line = re.sub(
+                  r'^\[[^\]]+\]\s*',
+                  '',
+                  line
               )
 
-          with open(
-              "../vexira-comparison.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              f.write("\n".join(output))
+              if line:
+                  cleaned.append(line)
 
-          print(f"Translated {len(output)} subtitle segments.")
+          # Small quality test first.
+          # No need to translate the entire video until
+          # we know Vexira produces acceptable Turkish.
+          cleaned = cleaned[:20]
+
+          with open("vexira-input.txt", "w", encoding="utf-8") as f:
+              for line in cleaned:
+                  f.write(line + "\n")
+
+          print("Prepared", len(cleaned), "lines")
+          print()
+          print("\n".join(cleaned[:5]))
           PY
 
+      - name: Translate with Vexira
+        run: |
+          cd vexira
+
+          echo "Checking Vexira usage..."
+          python translate.py --help || true
+
+          python translate.py \
+            --checkpoint models/vexira_sft.pt \
+            --spm_model models/vexira_spm.model \
+            --input ../vexira-input.txt \
+            --output ../vexira-output.txt
+
+      - name: Show translation result
+        if: success()
+        run: |
+          echo "=============================="
+          echo "VEXIRA TURKISH OUTPUT"
+          echo "=============================="
+          cat vexira-output.txt
+
       - name: Upload comparison to B2
+        if: success()
         run: |
           aws s3 cp \
-            vexira-comparison.txt \
-            "s3://${B2_BUCKET}/subtitle-tests/vexira-comparison.txt" \
+            "vexira-input.txt" \
+            "s3://${B2_BUCKET}/translation-tests/vexira-input.txt" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+          aws s3 cp \
+            "vexira-output.txt" \
+            "s3://${B2_BUCKET}/translation-tests/vexira-output.txt" \
             --endpoint-url "https://${B2_ENDPOINT}"
 
       - name: Verify
+        if: success()
         run: |
           aws s3 ls \
-            "s3://${B2_BUCKET}/subtitle-tests/vexira-comparison.txt" \
+            "s3://${B2_BUCKET}/translation-tests/" \
             --endpoint-url "https://${B2_ENDPOINT}"
