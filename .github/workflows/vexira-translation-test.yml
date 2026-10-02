@@ -27,92 +27,81 @@ jobs:
             transcript-en.txt \
             --endpoint-url "https://${B2_ENDPOINT}"
 
-      - name: Install translation packages
+      - name: Install Vexira
         run: |
+          git clone https://github.com/uixova/vexira.git
           python -m pip install --upgrade pip
-          pip install "transformers<5" sentencepiece torch safetensors
+          pip install torch sentencepiece huggingface_hub
 
-      - name: Translate to Turkish
+          mkdir -p vexira/models
+
+          huggingface-cli download \
+            uixova/vexira \
+            vexira_sft.pt \
+            vexira_spm.model \
+            --local-dir vexira/models
+
+      - name: Translate with Vexira
         run: |
-          cat > translate_vexira.py <<'PY'
+          cd vexira
+
+          python - <<'PY'
+          import sys
           import re
-          import torch
-          from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-          MODEL = "uixova/vexira"
+          sys.path.insert(0, ".")
 
-          tokenizer = AutoTokenizer.from_pretrained(
-              MODEL,
-              trust_remote_code=True
-          )
+          from translate import Translator
 
-          model = AutoModelForSeq2SeqLM.from_pretrained(
-              MODEL,
-              trust_remote_code=True
-          )
-          model.eval()
+          translator = Translator()
+
+          with open("../transcript-en.txt", "r", encoding="utf-8") as f:
+              lines = f.readlines()
+
+          output = []
 
           pattern = re.compile(
-              r"^\[(.*?) --> (.*?)\]\s*(.*)$"
+              r'^\[(.*?) --> (.*?)\]\s*(.*)$'
           )
 
-          entries = []
+          for line in lines:
+              line = line.strip()
 
-          with open("transcript-en.txt", encoding="utf-8") as f:
-              for line in f:
-                  line = line.strip()
+              if not line:
+                  continue
 
-                  if not line:
-                      continue
+              match = pattern.match(line)
 
-                  m = pattern.match(line)
+              if not match:
+                  continue
 
-                  if not m:
-                      continue
+              start = match.group(1)
+              end = match.group(2)
+              english = match.group(3).strip()
 
-                  start, end, english = m.groups()
+              if not english:
+                  continue
 
-                  inputs = tokenizer(
-                      english,
-                      return_tensors="pt",
-                      truncation=True,
-                      max_length=256
-                  )
+              turkish = translator.translate(
+                  [english],
+                  tgt_lang="tr"
+              )[0]
 
-                  with torch.no_grad():
-                      output = model.generate(
-                          **inputs,
-                          max_new_tokens=256,
-                          num_beams=4
-                      )
-
-                  turkish = tokenizer.decode(
-                      output[0],
-                      skip_special_tokens=True
-                  ).strip()
-
-                  entries.append(
-                      (start, end, english, turkish)
-                  )
+              output.append(
+                  f"[{start} --> {end}] "
+                  f"EN: {english}\n"
+                  f"TR: {turkish}\n"
+              )
 
           with open(
-              "vexira-comparison.txt",
+              "../vexira-comparison.txt",
               "w",
               encoding="utf-8"
-          ) as out:
+          ) as f:
+              f.write("\n".join(output))
 
-              for i, (start, end, en, tr) in enumerate(entries, 1):
-                  out.write(
-                      f"{i}\n"
-                      f"{start} --> {end}\n"
-                      f"EN: {en}\n"
-                      f"TR: {tr}\n\n"
-                  )
-
-          print(f"Translated {len(entries)} segments")
+          print(f"Translated {len(output)} subtitle segments.")
           PY
-
-          python translate_vexira.py
 
       - name: Upload comparison to B2
         run: |
