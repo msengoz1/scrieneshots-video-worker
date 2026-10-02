@@ -1,0 +1,30 @@
+name: B2 Video Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-b2:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install AWS CLI
+        run: |
+          aws --version
+
+      - name: Test Backblaze B2 connection
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+        run: |
+          echo "Scrieneshots B2 connection test" > scrieneshots-test.txt
+
+          aws s3 cp scrieneshots-test.txt \
+            "s3://${B2_BUCKET}/system-test/scrieneshots-test.txt" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+          aws s3 ls \
+            "s3://${B2_BUCKET}/system-test/" \
+            --endpoint-url "https://${B2_ENDPOINT}"
