@@ -15,16 +15,23 @@ jobs:
       B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
 
     steps:
-      - name: Download video
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download video from B2
         run: |
           aws s3 cp \
             "s3://${B2_BUCKET}/From Film to TV_ Acting with Cillian Murphy & Tom Hardy.mp4" \
-            input.mp4 \
+            "input.mp4" \
             --endpoint-url "https://${B2_ENDPOINT}"
+          ls -lh input.mp4
 
       - name: Install transcription and translation
         run: |
           python -m pip install --upgrade pip
+          pip install --only-binary=:all: "av>=12,<14"
           pip install faster-whisper "transformers<5" sentencepiece torch
 
       - name: Transcribe and translate
@@ -54,9 +61,11 @@ jobs:
               beam_size=5,
               vad_filter=True
           )
+
           segments = list(segments)
 
           model_name = "Helsinki-NLP/opus-mt-tc-big-en-tr"
+
           tokenizer = AutoTokenizer.from_pretrained(model_name)
           translator = AutoModelForSeq2SeqLM.from_pretrained(model_name)
           translator.eval()
@@ -66,7 +75,14 @@ jobs:
 
               for i, seg in enumerate(segments, 1):
                   source = seg.text.strip()
-                  en.write(f"[{ts(seg.start)} --> {ts(seg.end)}] {source}\n")
+
+                  if not source:
+                      continue
+
+                  en.write(
+                      f"[{ts(seg.start)} --> {ts(seg.end)}] "
+                      f"{source}\n"
+                  )
 
                   inputs = tokenizer(
                       source,
@@ -87,7 +103,6 @@ jobs:
                       skip_special_tokens=True
                   ).strip()
 
-                  # Keep subtitle text readable and at most two lines.
                   lines = textwrap.wrap(
                       translated,
                       width=38,
@@ -96,10 +111,12 @@ jobs:
                   )
 
                   if len(lines) > 2:
-                      midpoint = max(1, len(translated) // 2)
+                      midpoint = len(translated) // 2
                       split = translated.rfind(" ", 0, midpoint)
+
                       if split < 1:
                           split = translated.find(" ", midpoint)
+
                       if split > 0:
                           lines = [
                               translated[:split].strip(),
@@ -121,15 +138,22 @@ jobs:
 
           python make_subtitles.py
 
-      - name: Upload subtitle results
+      - name: Show generated files
+        run: |
+          ls -lh transcript-en.txt
+          ls -lh subtitles-tr.srt
+          echo "----- TR SRT PREVIEW -----"
+          head -n 40 subtitles-tr.srt
+
+      - name: Upload subtitle results to B2
         run: |
           aws s3 cp \
-            subtitles-tr.srt \
+            "subtitles-tr.srt" \
             "s3://${B2_BUCKET}/subtitle-tests/subtitles-tr.srt" \
             --endpoint-url "https://${B2_ENDPOINT}"
 
           aws s3 cp \
-            transcript-en.txt \
+            "transcript-en.txt" \
             "s3://${B2_BUCKET}/subtitle-tests/transcript-en.txt" \
             --endpoint-url "https://${B2_ENDPOINT}"
 
