@@ -15,10 +15,11 @@ jobs:
       B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
 
     steps:
-          - name: Install FFmpeg
+      - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
       - name: Check FFmpeg
         run: |
           ffmpeg -version
@@ -29,7 +30,6 @@ jobs:
             "s3://${B2_BUCKET}/From Film to TV_ Acting with Cillian Murphy & Tom Hardy.mp4" \
             "input.mp4" \
             --endpoint-url "https://${B2_ENDPOINT}"
-
           ls -lh input.mp4
 
       - name: Process real video with FFmpeg
@@ -43,7 +43,6 @@ jobs:
             -c:a aac \
             -b:a 128k \
             output-test.mp4
-
           ls -lh output-test.mp4
 
       - name: Upload processed video to B2
