@@ -1,0 +1,56 @@
+name: Real Video FFmpeg Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+      B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+
+    steps:
+      - name: Check FFmpeg
+        run: |
+          ffmpeg -version
+
+      - name: Download real video from B2
+        run: |
+          aws s3 cp \
+            "s3://${B2_BUCKET}/From Film to TV_ Acting with Cillian Murphy & Tom Hardy.mp4" \
+            "input.mp4" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+          ls -lh input.mp4
+
+      - name: Process real video with FFmpeg
+        run: |
+          ffmpeg -y \
+            -i input.mp4 \
+            -t 10 \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -c:a aac \
+            -b:a 128k \
+            output-test.mp4
+
+          ls -lh output-test.mp4
+
+      - name: Upload processed video to B2
+        run: |
+          aws s3 cp \
+            "output-test.mp4" \
+            "s3://${B2_BUCKET}/processed-tests/output-test.mp4" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+      - name: Verify uploaded video
+        run: |
+          aws s3 ls \
+            "s3://${B2_BUCKET}/processed-tests/output-test.mp4" \
+            --endpoint-url "https://${B2_ENDPOINT}"
