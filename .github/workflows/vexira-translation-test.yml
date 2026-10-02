@@ -24,34 +24,50 @@ jobs:
         run: |
           aws s3 cp \
             "s3://${B2_BUCKET}/subtitle-tests/transcript-en.txt" \
-            "transcript-en.txt" \
+            transcript-en.txt \
             --endpoint-url "https://${B2_ENDPOINT}"
 
           echo "Transcript downloaded:"
-          head -n 10 transcript-en.txt
+          ls -lh transcript-en.txt
 
-      - name: Install Vexira
+      - name: Install Vexira dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch sentencepiece huggingface_hub
+          pip install torch sentencepiece numpy
 
-          git clone https://github.com/uixova/vexira.git
-          cd vexira
-
-          mkdir -p models
-
-          hf download \
-            uixova/vexira \
-            vexira_sft.pt \
-            vexira_spm.model \
-            --local-dir models
+      - name: Download Vexira
+        run: |
+          git clone https://huggingface.co/MetinLutfi/vexira vexira
 
           echo "Vexira files:"
-          find . -maxdepth 2 -type f | sort
+          find vexira -maxdepth 2 -type f | head -50
+
+      - name: Find Vexira model files
+        run: |
+          cd vexira
+
+          CKPT=$(find . -type f \( -name "*.pt" -o -name "*.pth" \) | head -1)
+          SPM=$(find . -type f \( -name "*.model" -o -name "*.spm" \) | head -1)
+
+          echo "CKPT=$CKPT"
+          echo "SPM=$SPM"
+
+          if [ -z "$CKPT" ]; then
+            echo "ERROR: Vexira checkpoint file not found"
+            exit 1
+          fi
+
+          if [ -z "$SPM" ]; then
+            echo "ERROR: Vexira SentencePiece model not found"
+            exit 1
+          fi
+
+          echo "VEXIRA_CKPT=$CKPT" >> "$GITHUB_ENV"
+          echo "VEXIRA_SPM=$SPM" >> "$GITHUB_ENV"
 
       - name: Prepare clean English text
         run: |
-          python <<'PY'
+          python - <<'PY'
           import re
 
           with open("transcript-en.txt", "r", encoding="utf-8") as f:
@@ -65,10 +81,8 @@ jobs:
               if not line:
                   continue
 
-              # Remove Whisper timestamps such as:
-              # [00:00:01,000 --> 00:00:04,000]
               line = re.sub(
-                  r'^\[[^\]]+\]\s*',
+                  r'^\[[0-9:,]+\s*-->\s*[0-9:,]+\]\s*',
                   '',
                   line
               )
@@ -76,57 +90,57 @@ jobs:
               if line:
                   cleaned.append(line)
 
-          # Small quality test first.
-          # No need to translate the entire video until
-          # we know Vexira produces acceptable Turkish.
-          cleaned = cleaned[:20]
-
           with open("vexira-input.txt", "w", encoding="utf-8") as f:
               for line in cleaned:
                   f.write(line + "\n")
 
           print("Prepared", len(cleaned), "lines")
-          print()
-          print("\n".join(cleaned[:5]))
           PY
+
+          echo "Input preview:"
+          head -10 vexira-input.txt
 
       - name: Translate with Vexira
         run: |
           cd vexira
 
-          echo "Checking Vexira usage..."
-          python translate.py --help || true
+          TRANSLATE=$(find . -type f -name "translate.py" | head -1)
 
-          python translate.py \
-            --checkpoint models/vexira_sft.pt \
-            --spm_model models/vexira_spm.model \
-            --input ../vexira-input.txt \
-            --output ../vexira-output.txt
+          if [ -z "$TRANSLATE" ]; then
+            echo "ERROR: translate.py not found"
+            exit 1
+          fi
+
+          echo "Using translator: $TRANSLATE"
+          echo "Using checkpoint: $VEXIRA_CKPT"
+          echo "Using SPM: $VEXIRA_SPM"
+
+          python "$TRANSLATE" \
+            --ckpt "$VEXIRA_CKPT" \
+            --spm "$VEXIRA_SPM" \
+            --device cpu \
+            --to tr \
+            --file "../vexira-input.txt" \
+            --out "../vexira-output.txt"
 
       - name: Show translation result
-        if: success()
         run: |
-          echo "=============================="
-          echo "VEXIRA TURKISH OUTPUT"
-          echo "=============================="
-          cat vexira-output.txt
+          echo "===== VEXIRA TURKISH OUTPUT ====="
+          head -50 vexira-output.txt
 
-      - name: Upload comparison to B2
-        if: success()
+          echo ""
+          echo "Output file:"
+          ls -lh vexira-output.txt
+
+      - name: Upload Vexira result to B2
         run: |
           aws s3 cp \
-            "vexira-input.txt" \
-            "s3://${B2_BUCKET}/translation-tests/vexira-input.txt" \
-            --endpoint-url "https://${B2_ENDPOINT}"
-
-          aws s3 cp \
-            "vexira-output.txt" \
+            vexira-output.txt \
             "s3://${B2_BUCKET}/translation-tests/vexira-output.txt" \
             --endpoint-url "https://${B2_ENDPOINT}"
 
       - name: Verify
-        if: success()
         run: |
           aws s3 ls \
-            "s3://${B2_BUCKET}/translation-tests/" \
+            "s3://${B2_BUCKET}/translation-tests/vexira-output.txt" \
             --endpoint-url "https://${B2_ENDPOINT}"
