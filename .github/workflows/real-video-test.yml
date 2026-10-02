@@ -15,6 +15,10 @@ jobs:
       B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
 
     steps:
+          - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
       - name: Check FFmpeg
         run: |
           ffmpeg -version
