@@ -1,0 +1,149 @@
+name: TR Subtitle Test V2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  subtitles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+      B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download video
+        run: |
+          aws s3 cp \
+            "s3://${B2_BUCKET}/From Film to TV_ Acting with Cillian Murphy & Tom Hardy.mp4" \
+            input.mp4 \
+            --endpoint-url "https://${B2_ENDPOINT}"
+          ls -lh input.mp4
+
+      - name: Install transcription and translation
+        run: |
+          python --version
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "faster-whisper==1.2.1" \
+            "av==14.4.0" \
+            "transformers<5" \
+            sentencepiece \
+            torch
+
+      - name: Transcribe and translate
+        run: |
+          cat > make_subtitles.py <<'PY'
+          from faster_whisper import WhisperModel
+          from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+          import torch
+          import textwrap
+
+          def ts(seconds):
+              ms = int(round(seconds * 1000))
+              h, ms = divmod(ms, 3600000)
+              m, ms = divmod(ms, 60000)
+              s, ms = divmod(ms, 1000)
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+          whisper = WhisperModel(
+              "small.en",
+              device="cpu",
+              compute_type="int8"
+          )
+
+          segments, info = whisper.transcribe(
+              "input.mp4",
+              language="en",
+              beam_size=5,
+              vad_filter=True
+          )
+          segments = list(segments)
+
+          model_name = "Helsinki-NLP/opus-mt-tc-big-en-tr"
+          tokenizer = AutoTokenizer.from_pretrained(model_name)
+          translator = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+          translator.eval()
+
+          with open("transcript-en.txt", "w", encoding="utf-8") as en, \
+               open("subtitles-tr.srt", "w", encoding="utf-8") as tr:
+
+              for i, seg in enumerate(segments, 1):
+                  source = seg.text.strip()
+
+                  en.write(
+                      f"[{ts(seg.start)} --> {ts(seg.end)}] {source}\n"
+                  )
+
+                  inputs = tokenizer(
+                      source,
+                      return_tensors="pt",
+                      truncation=True,
+                      max_length=512
+                  )
+
+                  with torch.no_grad():
+                      generated = translator.generate(
+                          **inputs,
+                          max_new_tokens=160,
+                          num_beams=4
+                      )
+
+                  translated = tokenizer.decode(
+                      generated[0],
+                      skip_special_tokens=True
+                  ).strip()
+
+                  lines = textwrap.wrap(
+                      translated,
+                      width=38,
+                      break_long_words=False,
+                      break_on_hyphens=False
+                  )
+
+                  if len(lines) > 2:
+                      words = translated.split()
+                      midpoint = max(1, len(words) // 2)
+                      lines = [
+                          " ".join(words[:midpoint]),
+                          " ".join(words[midpoint:])
+                      ]
+
+                  subtitle = "\n".join(lines[:2])
+
+                  tr.write(
+                      f"{i}\n"
+                      f"{ts(seg.start)} --> {ts(seg.end)}\n"
+                      f"{subtitle}\n\n"
+                  )
+
+          print(f"Created {len(segments)} subtitle segments")
+          PY
+
+          python make_subtitles.py
+
+      - name: Upload subtitle results to B2
+        run: |
+          aws s3 cp \
+            subtitles-tr.srt \
+            "s3://${B2_BUCKET}/subtitle-tests-v2/subtitles-tr.srt" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+          aws s3 cp \
+            transcript-en.txt \
+            "s3://${B2_BUCKET}/subtitle-tests-v2/transcript-en.txt" \
+            --endpoint-url "https://${B2_ENDPOINT}"
+
+      - name: Verify
+        run: |
+          aws s3 ls \
+            "s3://${B2_BUCKET}/subtitle-tests-v2/" \
+            --endpoint-url "https://${B2_ENDPOINT}"
